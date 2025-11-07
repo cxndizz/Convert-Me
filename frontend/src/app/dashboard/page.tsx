@@ -1,212 +1,209 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
-import { getSessionInfo, generateProfile, SessionInfo, ProfileResponse } from '@/lib/api';
-import DataProfileSummary from '@/components/DataProfileSummary';
+import { useState, useEffect } from 'react';
+import { useParams } from 'next/navigation';
+import { generateProfile } from '@/lib/api';
+import { DataProfile } from '@/types';
+import { 
+  formatPercentage, 
+  getSeverityLevel,
+  getSeverityColor
+} from '@/lib/utils';
+import { FiAlertTriangle, FiCheckCircle, FiInfo } from 'react-icons/fi';
 
-// Component แยกที่ใช้ useSearchParams
-function DashboardContent() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const sessionId = searchParams.get('session') || '';
+export default function DashboardOverview() {
+  const params = useParams();
+  const sessionId = params.sessionId as string;
   
-  const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
-  const [profile, setProfile] = useState<ProfileResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [profileLoading, setProfileLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [profile, setProfile] = useState<DataProfile | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
 
-  // ดึงข้อมูลเซสชันและสร้างโปรไฟล์
   useEffect(() => {
-    // ถ้าไม่มี sessionId ใน URL ให้ลองดึงจาก localStorage
-    const storedSessionId = !sessionId ? localStorage.getItem('datamap_session_id') : null;
-    
-    if (!sessionId && !storedSessionId) {
-      // ถ้าไม่พบ sessionId ให้กลับไปหน้า Upload
-      router.push('/upload');
-      return;
-    }
-
-    const activeSessionId = sessionId || storedSessionId!;
-
-    // ดึงข้อมูล session
-    async function fetchSessionInfo() {
-      setLoading(true);
+    const fetchProfile = async () => {
       try {
-        const info = await getSessionInfo(activeSessionId);
-        setSessionInfo(info);
-        
-        // ถ้ายังไม่มีไฟล์ใน session ให้กลับไปหน้า Upload
-        if (info.files.length === 0) {
-          router.push('/upload');
-          return;
-        }
-
-        // ดึงข้อมูลโปรไฟล์
-        await fetchProfile(activeSessionId, info.files[info.files.length - 1].file_id);
-      } catch (err) {
-        console.error(err);
-        setError('Failed to load session information. The session may have expired.');
+        const data = await generateProfile(sessionId);
+        setProfile(data);
+      } catch (error) {
+        console.error('Failed to fetch data profile:', error);
       } finally {
         setLoading(false);
       }
-    }
+    };
 
-    fetchSessionInfo();
-  }, [sessionId, router]);
-
-  // ฟังก์ชันดึงข้อมูลโปรไฟล์
-  const fetchProfile = async (sessionId: string, fileId: string) => {
-    setProfileLoading(true);
-    try {
-      const profileData = await generateProfile(sessionId, fileId);
-      setProfile(profileData);
-    } catch (err: any) {
-      console.error(err);
-      setError(`Failed to generate data profile: ${err.message}`);
-    } finally {
-      setProfileLoading(false);
-    }
-  };
+    fetchProfile();
+  }, [sessionId]);
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mx-auto"></div>
-          <p className="mt-4">Loading session data...</p>
-        </div>
+      <div className="card p-8 text-center">
+        <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-primary-500 border-r-transparent"></div>
+        <p className="mt-4 text-gray-600">Analyzing data...</p>
       </div>
     );
   }
 
-  if (error) {
+  if (!profile) {
     return (
-      <div className="max-w-4xl mx-auto p-6">
-        <div className="bg-red-100 text-red-700 p-4 rounded">
-          <h2 className="text-xl font-semibold mb-2">Error</h2>
-          <p>{error}</p>
-          <button
-            className="mt-4 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-            onClick={() => router.push('/upload')}
-          >
-            Go to Upload Page
-          </button>
-        </div>
+      <div className="card p-6 text-center text-red-600">
+        <p>Failed to load data profile. Please try again.</p>
       </div>
     );
   }
 
   return (
-    <div className="max-w-6xl mx-auto p-6">
-      <h1 className="text-3xl font-bold mb-8">Data Dashboard</h1>
-      
-      {sessionInfo && (
-        <div className="mb-6">
-          <div className="bg-white shadow rounded-lg p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4">Session Information</h2>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <p className="text-gray-500">Session ID</p>
-                <p className="font-mono">{sessionInfo.session_id}</p>
-              </div>
-              <div>
-                <p className="text-gray-500">Expires in</p>
-                <p>{Math.floor(sessionInfo.ttl_s / 60)} minutes</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-white shadow rounded-lg p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4">Uploaded Files</h2>
-            {sessionInfo.files.map((file) => (
-              <div key={file.file_id} className="border-b border-gray-200 py-4 last:border-0">
-                <h3 className="font-semibold">{file.original_filename}</h3>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-2">
-                  <div>
-                    <p className="text-gray-500 text-sm">Size</p>
-                    <p>{(file.size_bytes / (1024 * 1024)).toFixed(2)} MB</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-500 text-sm">Encoding</p>
-                    <p>{file.encoding || 'Unknown'}</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-500 text-sm">Delimiter</p>
-                    <p>{file.detected_delimiter || 'N/A'}</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-500 text-sm">Header</p>
-                    <p>{file.header_detected !== undefined ? (file.header_detected ? 'Yes' : 'No') : 'Unknown'}</p>
-                  </div>
-                </div>
-                {sessionInfo.files.length > 1 && (
-                  <button 
-                    className="mt-2 text-blue-600 text-sm hover:underline"
-                    onClick={() => fetchProfile(sessionInfo.session_id, file.file_id)}
-                  >
-                    View profile for this file
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-          
-          {profileLoading ? (
-            <div className="bg-white shadow rounded-lg p-6 flex items-center justify-center" style={{minHeight: '300px'}}>
-              <div className="text-center">
-                <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mx-auto"></div>
-                <p className="mt-4">Generating data profile...</p>
-                <p className="text-sm text-gray-500 mt-2">This might take a moment for large files.</p>
-              </div>
-            </div>
-          ) : profile ? (
-            <DataProfileSummary profile={profile} />
-          ) : (
-            <div className="bg-white shadow rounded-lg p-6">
-              <div className="text-center py-8">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 mx-auto text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                <h2 className="mt-4 text-xl font-medium">No profile generated yet</h2>
-                <p className="mt-2 text-gray-500">Click the button below to generate a data profile for your file.</p>
-                <button 
-                  className="mt-4 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-                  onClick={() => fetchProfile(sessionInfo.session_id, sessionInfo.files[sessionInfo.files.length - 1].file_id)}
-                >
-                  Generate Profile
-                </button>
-              </div>
-            </div>
-          )}
-          
-          <div className="mt-6 flex space-x-4">
-            <button
-              className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-              onClick={() => router.push('/upload')}
-            >
-              Upload Another File
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// หน้าหลักที่ครอบ DashboardContent ด้วย Suspense
-export default function DashboardPage() {
-  return (
-    <Suspense fallback={
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mx-auto"></div>
-          <p className="mt-4">Loading dashboard...</p>
+    <div>
+      <div className="card mb-6">
+        <h2 className="text-xl font-semibold mb-4">Column Analysis</h2>
+        
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="table-header px-6 py-3">Column Name</th>
+                <th className="table-header px-6 py-3">Inferred Type</th>
+                <th className="table-header px-6 py-3">NULL %</th>
+                <th className="table-header px-6 py-3">Distinct %</th>
+                <th className="table-header px-6 py-3">Sample Values</th>
+                <th className="table-header px-6 py-3">Issues</th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {profile.columns_profile.map((column) => {
+                const nullSeverity = getSeverityLevel(column.null_pct);
+                const nullClass = getSeverityColor(nullSeverity);
+                
+                return (
+                  <tr key={column.name} className="hover:bg-gray-50">
+                    <td className="table-cell font-medium">{column.name}</td>
+                    <td className="table-cell">{column.inferred_type}</td>
+                    <td className="table-cell">
+                      <span className={`px-2 py-1 rounded-full text-xs ${nullClass}`}>
+                        {formatPercentage(column.null_pct)}
+                      </span>
+                    </td>
+                    <td className="table-cell">{formatPercentage(column.distinct_pct)}</td>
+                    <td className="table-cell">
+                      <div className="max-w-xs truncate">
+                        {column.samples.slice(0, 3).map((sample, i) => (
+                          <span key={i} className="mr-1">
+                            {sample !== null ? String(sample) : 'NULL'}
+                            {i < 2 && column.samples.length > i + 1 ? ', ' : ''}
+                          </span>
+                        ))}
+                        {column.samples.length > 3 && '...'}
+                      </div>
+                    </td>
+                    <td className="table-cell">
+                      {column.issues && column.issues.length > 0 ? (
+                        <div className="flex items-center text-red-600">
+                          <FiAlertTriangle className="mr-1" />
+                          <span>{column.issues.length}</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center text-green-600">
+                          <FiCheckCircle className="mr-1" />
+                          <span>None</span>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
-    }>
-      <DashboardContent />
-    </Suspense>
+      
+      <div className="card">
+        <h2 className="text-xl font-semibold mb-4">Data Quality Insights</h2>
+        
+        <div className="space-y-4">
+          {/* Empty values analysis */}
+          <div>
+            <h3 className="font-medium text-gray-800 mb-2 flex items-center">
+              <FiInfo className="mr-2 text-primary-500" />
+              Empty Values
+            </h3>
+            <div className="pl-6">
+              {profile.columns_profile.some(col => col.null_pct > 0) ? (
+                <ul className="list-disc pl-5">
+                  {profile.columns_profile
+                    .filter(col => col.null_pct > 5) // Only show columns with >5% nulls
+                    .sort((a, b) => b.null_pct - a.null_pct) // Sort by highest null % first
+                    .slice(0, 5) // Show top 5 only
+                    .map(col => (
+                      <li key={col.name} className="mb-1">
+                        <span className="font-medium">{col.name}</span>: 
+                        <span className={`ml-2 ${getSeverityColor(getSeverityLevel(col.null_pct))}`}>
+                          {formatPercentage(col.null_pct)} empty
+                        </span>
+                      </li>
+                    ))}
+                </ul>
+              ) : (
+                <p className="text-green-600 flex items-center">
+                  <FiCheckCircle className="mr-2" />
+                  No significant empty values found!
+                </p>
+              )}
+            </div>
+          </div>
+          
+          {/* Type recommendations */}
+          <div>
+            <h3 className="font-medium text-gray-800 mb-2 flex items-center">
+              <FiInfo className="mr-2 text-primary-500" />
+              Type Recommendations
+            </h3>
+            <div className="pl-6">
+              <ul className="list-disc pl-5">
+                {profile.columns_profile.map(col => (
+                  <li key={col.name} className="mb-1">
+                    <span className="font-medium">{col.name}</span>: Recommended type 
+                    <span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 rounded">
+                      {col.inferred_type}
+                    </span>
+                  </li>
+                )).slice(0, 5)}
+                {profile.columns_profile.length > 5 && (
+                  <li className="text-gray-500 italic">
+                    ... and {profile.columns_profile.length - 5} more columns
+                  </li>
+                )}
+              </ul>
+            </div>
+          </div>
+          
+          {/* Issues found */}
+          <div>
+            <h3 className="font-medium text-gray-800 mb-2 flex items-center">
+              <FiAlertTriangle className="mr-2 text-yellow-500" />
+              Potential Issues
+            </h3>
+            <div className="pl-6">
+              {profile.columns_profile.some(col => col.issues && col.issues.length > 0) ? (
+                <ul className="list-disc pl-5">
+                  {profile.columns_profile
+                    .filter(col => col.issues && col.issues.length > 0)
+                    .map(col => (
+                      <li key={col.name} className="mb-1">
+                        <span className="font-medium">{col.name}</span>: 
+                        <span className="ml-2 text-red-600">
+                          {col.issues!.join(', ')}
+                        </span>
+                      </li>
+                    ))}
+                </ul>
+              ) : (
+                <p className="text-green-600 flex items-center">
+                  <FiCheckCircle className="mr-2" />
+                  No significant issues detected!
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
