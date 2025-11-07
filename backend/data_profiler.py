@@ -1,0 +1,540 @@
+import os
+import duckdb
+import polars as pl
+import pyarrow as pa
+import pyarrow.csv as csv
+import pyarrow.parquet as pq
+import json
+import pandas as pd
+from typing import Dict, List, Optional, Any, Tuple
+import re
+import chardet
+from datetime import datetime
+
+class DataProfiler:
+    def __init__(self, file_path: str, file_info: Dict[str, Any]):
+        """
+        เริ่มต้นวิเคราะห์ไฟล์
+        file_path: พาธไฟล์ที่จะวิเคราะห์
+        file_info: ข้อมูลเบื้องต้นของไฟล์ (encoding, detected_delimiter, header_detected)
+        """
+        self.file_path = file_path
+        self.file_info = file_info
+        self.file_extension = os.path.splitext(file_path)[1].lower()
+        
+        # กำหนดค่าเริ่มต้นจากข้อมูลไฟล์
+        self.encoding = file_info.get('encoding', 'utf-8')
+        self.delimiter = file_info.get('detected_delimiter', ',')
+        self.header = file_info.get('header_detected', True)
+        
+        # ข้อมูลผลการวิเคราะห์
+        self.profile_results = {}
+    
+    def profile(self, max_sample_rows: int = 10000) -> Dict[str, Any]:
+        """
+        วิเคราะห์ไฟล์และสร้างโปรไฟล์ข้อมูล
+        max_sample_rows: จำนวนแถวสูงสุดที่จะใช้เป็นตัวอย่าง
+        """
+        try:
+            # ตรวจสอบประเภทไฟล์และเลือกวิธีการโหลดข้อมูลที่เหมาะสม
+            if self.file_extension in ['.csv', '.txt']:
+                df = self._load_csv_data(max_sample_rows)
+            elif self.file_extension in ['.xls', '.xlsx']:
+                df = self._load_excel_data(max_sample_rows)
+            elif self.file_extension == '.sql':
+                df = self._load_sql_data(max_sample_rows)
+            else:
+                raise ValueError(f"Unsupported file type: {self.file_extension}")
+            
+            if df is None or df.shape[0] == 0:
+                return {"error": "Failed to load data or empty file"}
+            
+            # ทำ data profiling
+            self._compute_basic_stats(df)
+            self._compute_column_stats(df)
+            
+            return self.profile_results
+            
+        except Exception as e:
+            # ถ้ามีข้อผิดพลาด คืนข้อความข้อผิดพลาด
+            return {"error": str(e)}
+    
+    def _load_csv_data(self, max_rows: int) -> pl.DataFrame:
+        """โหลดข้อมูล CSV/TXT โดยใช้ Polars"""
+        # ตรวจสอบ/ปรับปรุงค่า delimiter ถ้าจำเป็น
+        if not self.delimiter:
+            # ถ้ายังไม่มี delimiter ลองตรวจจับอีกครั้ง
+            self.delimiter = self._detect_delimiter()
+        
+        try:
+            # ใช้ Polars อ่านข้อมูลแบบ streaming
+            df = pl.read_csv(
+                self.file_path,
+                separator=self.delimiter,
+                encoding=self.encoding,
+                infer_schema_length=max_rows,
+                n_rows=max_rows,
+                has_header=self.header,
+                ignore_errors=True,
+                low_memory=True
+            )
+            return df
+        except Exception as e:
+            print(f"Error loading CSV with Polars: {e}")
+            # Fallback ใช้ PyArrow
+            try:
+                parse_options = csv.ParseOptions(
+                    delimiter=self.delimiter,
+                    ignore_empty_lines=True,
+                    escape_char="\\",
+                    quote_char='"'
+                )
+                
+                read_options = csv.ReadOptions(
+                    skip_rows=1 if self.header else 0,
+                    encoding=self.encoding,
+                    use_threads=True,
+                    block_size=10 * 1024 * 1024  # 10 MB block size
+                )
+                
+                table = csv.read_csv(
+                    self.file_path,
+                    parse_options=parse_options,
+                    read_options=read_options
+                )
+                
+                # แปลงเป็น Polars DataFrame
+                df = pl.from_arrow(table)
+                
+                # จำกัดจำนวนแถว
+                if len(df) > max_rows:
+                    df = df.head(max_rows)
+                    
+                return df
+            except Exception as e2:
+                print(f"Error loading CSV with PyArrow: {e2}")
+                # Fallback ใช้ DuckDB
+                try:
+                    conn = duckdb.connect(database=':memory:')
+                    query = f"""
+                    SELECT * FROM read_csv(
+                        '{self.file_path}',
+                        delim='{self.delimiter}',
+                        header={str(self.header).lower()},
+                        sample_size={max_rows},
+                        AUTO_DETECT=TRUE
+                    ) LIMIT {max_rows}
+                    """
+                    df_duck = conn.execute(query).fetchdf()
+                    # แปลงเป็น Polars DataFrame
+                    df = pl.from_pandas(df_duck)
+                    return df
+                except Exception as e3:
+                    print(f"All CSV loading methods failed: {e3}")
+                    raise ValueError(f"Failed to load CSV: {e3}")
+    
+    def _load_excel_data(self, max_rows: int) -> pl.DataFrame:
+        """โหลดข้อมูล Excel โดยใช้ pandas แล้วแปลงเป็น Polars"""
+        try:
+            # ตรวจสอบนามสกุลไฟล์เพื่อเลือก engine ที่เหมาะสม
+            file_ext = os.path.splitext(self.file_path)[1].lower()
+            
+            if file_ext == '.xlsx':
+                # สำหรับไฟล์ .xlsx ใช้ openpyxl
+                engine = 'openpyxl'
+            elif file_ext == '.xls':
+                # สำหรับไฟล์ .xls ใช้ xlrd
+                engine = 'xlrd'
+            else:
+                # กรณีไม่สามารถระบุได้ชัดเจน ลองใช้ openpyxl ก่อน
+                engine = 'openpyxl'
+            
+            # อ่านเฉพาะ n แถวแรกเพื่อประหยัดหน่วยความจำ
+            df_pd = pd.read_excel(
+                self.file_path,
+                nrows=max_rows,
+                header=0 if self.header else None,
+                engine=engine  # ระบุ engine ที่จะใช้
+            )
+            
+            # แปลงเป็น Polars DataFrame
+            df = pl.from_pandas(df_pd)
+            return df
+        except Exception as e:
+            print(f"Error loading Excel: {e}")
+            
+            # ลองใช้ engine ตัวอื่นหากวิธีแรกไม่สำเร็จ
+            try:
+                if engine == 'openpyxl':
+                    print("Trying with xlrd engine instead...")
+                    df_pd = pd.read_excel(
+                        self.file_path,
+                        nrows=max_rows,
+                        header=0 if self.header else None,
+                        engine='xlrd'
+                    )
+                else:
+                    print("Trying with openpyxl engine instead...")
+                    df_pd = pd.read_excel(
+                        self.file_path,
+                        nrows=max_rows,
+                        header=0 if self.header else None,
+                        engine='openpyxl'
+                    )
+                
+                # แปลงเป็น Polars DataFrame
+                df = pl.from_pandas(df_pd)
+                return df
+            except Exception as e2:
+                print(f"All Excel loading methods failed: {e2}")
+                raise ValueError(f"Failed to load Excel file: {e2}")
+    
+    def _load_sql_data(self, max_rows: int) -> pl.DataFrame:
+        """
+        อ่านไฟล์ SQL และพยายามดึงข้อมูลจากคำสั่ง CREATE TABLE
+        หรือ INSERT INTO ถ้ามี
+        """
+        try:
+            # อ่านไฟล์ SQL
+            with open(self.file_path, 'r', encoding=self.encoding) as f:
+                sql_content = f.read()
+            
+            # ดึงข้อมูลโครงสร้างตาราง (CREATE TABLE)
+            create_table_match = re.search(r'CREATE\s+TABLE\s+([^\s(]+)\s*\(([^;]+)\)', sql_content, re.IGNORECASE | re.DOTALL)
+            
+            if create_table_match:
+                table_name = create_table_match.group(1).strip('`"[]')
+                columns_def = create_table_match.group(2)
+                
+                # แยกคอลัมน์และชนิดข้อมูล
+                columns = []
+                column_types = {}
+                
+                for col_def in re.finditer(r'([^\s,]+)\s+([^,]+)', columns_def):
+                    col_name = col_def.group(1).strip('`"[]')
+                    col_type = col_def.group(2).split()[0].upper()
+                    columns.append(col_name)
+                    column_types[col_name] = col_type
+                
+                # ดึงข้อมูลจาก INSERT INTO ถ้ามี
+                insert_match = re.search(r'INSERT\s+INTO\s+[^\s(]+\s*(?:\([^)]+\))?\s*VALUES\s*([^;]+)', sql_content, re.IGNORECASE | re.DOTALL)
+                
+                data = []
+                if insert_match:
+                    values_text = insert_match.group(1)
+                    
+                    # แยกชุดข้อมูลแต่ละแถว
+                    for value_match in re.finditer(r'\(([^)]+)\)', values_text):
+                        row_values = value_match.group(1).split(',')
+                        data.append([v.strip("'\" ") for v in row_values])
+                        
+                        if len(data) >= max_rows:
+                            break
+                
+                # สร้าง DataFrame จากข้อมูลที่ดึงได้
+                if data:
+                    df = pl.DataFrame(data, columns=columns)
+                else:
+                    # ถ้าไม่มีข้อมูล ให้สร้าง DataFrame ว่างๆ ที่มีเฉพาะโครงสร้าง
+                    df = pl.DataFrame({col: [] for col in columns})
+                
+                return df
+            else:
+                # ถ้าไม่พบ CREATE TABLE ให้คืนค่า DataFrame ว่างๆ
+                return pl.DataFrame()
+                
+        except Exception as e:
+            print(f"Error processing SQL file: {e}")
+            # สร้าง DataFrame ว่างๆ
+            return pl.DataFrame()
+    
+    def _detect_delimiter(self) -> str:
+        """ตรวจสอบตัวคั่นในไฟล์ CSV/TXT"""
+        # อ่านตัวอย่างข้อมูลจากไฟล์
+        with open(self.file_path, 'rb') as f:
+            sample = f.read(4096)  # อ่าน 4KB แรกเป็นตัวอย่าง
+        
+        # ถ้าไฟล์ใหญ่มาก ให้อ่านตัวอย่างบรรทัดจากต้นไฟล์
+        sample_text = sample.decode(self.encoding, errors='replace')
+        
+        # ตรวจสอบตัวคั่นที่พบบ่อย
+        delimiters = [',', ';', '\t', '|']
+        counts = {d: sample_text.count(d) for d in delimiters}
+        
+        # เลือกตัวคั่นที่พบมากที่สุด
+        if max(counts.values()) > 0:
+            return max(counts, key=counts.get)
+        else:
+            # ถ้าไม่พบตัวคั่นใดๆ ให้ใช้ comma เป็นค่าเริ่มต้น
+            return ','
+    
+    def _compute_basic_stats(self, df: pl.DataFrame) -> None:
+        """คำนวณสถิติพื้นฐานของข้อมูลทั้งหมด"""
+        # จำนวนแถวและคอลัมน์
+        row_count = len(df)
+        column_count = len(df.columns)
+        
+        # เก็บผลลัพธ์
+        self.profile_results.update({
+            "row_count": row_count,
+            "column_count": column_count,
+            "file_name": os.path.basename(self.file_path),
+            "file_extension": self.file_extension,
+            "encoding": self.encoding,
+            "delimiter": self.delimiter if self.file_extension in ['.csv', '.txt'] else None,
+            "header_detected": self.header
+        })
+    
+    def _compute_column_stats(self, df: pl.DataFrame) -> None:
+        """คำนวณสถิติต่อคอลัมน์"""
+        columns_profile = []
+        
+        for col_name in df.columns:
+            col_series = df[col_name]
+            
+            # นับค่า null
+            null_count = col_series.null_count()
+            null_pct = (null_count / len(df)) * 100 if len(df) > 0 else 0
+            
+            # นับค่าที่ไม่ซ้ำกัน
+            try:
+                unique_values = col_series.drop_nulls().unique()
+                distinct_count = len(unique_values)
+                distinct_pct = (distinct_count / (len(df) - null_count)) * 100 if (len(df) - null_count) > 0 else 0
+            except:
+                # ในกรณีที่มีปัญหากับการนับค่าที่ไม่ซ้ำ
+                distinct_count = 0
+                distinct_pct = 0
+            
+            # เดาชนิดข้อมูล
+            inferred_type = self._infer_column_type(col_series)
+            
+            # คำนวณค่าสถิติตามชนิดข้อมูล
+            stats = self._compute_type_specific_stats(col_series, inferred_type)
+            
+            # รวมข้อมูลโปรไฟล์คอลัมน์
+            col_profile = {
+                "name": col_name,
+                "inferred_type": inferred_type,
+                "null_count": null_count,
+                "null_pct": null_pct,
+                "distinct_count": distinct_count,
+                "distinct_pct": distinct_pct,
+                **stats
+            }
+            
+            # เพิ่มตัวอย่างข้อมูล
+            col_profile["sample_values"] = self._get_sample_values(col_series)
+            
+            # ตรวจสอบปัญหา
+            col_profile["issues"] = self._check_column_issues(col_series, inferred_type, null_pct, distinct_pct)
+            
+            columns_profile.append(col_profile)
+        
+        # เก็บผลลัพธ์
+        self.profile_results["columns_profile"] = columns_profile
+    
+    def _infer_column_type(self, series: pl.Series) -> str:
+        """
+        เดาชนิดข้อมูลของคอลัมน์
+        คืนค่าเป็น: "INTEGER", "FLOAT", "BOOLEAN", "DATE", "TIMESTAMP", "STRING"
+        """
+        # ตรวจสอบชนิดข้อมูลจาก Polars
+        dtype = str(series.dtype)
+        
+        # ถ้าเป็น Float หรือ Integer ก็คืนค่าตามนั้น
+        if 'float' in dtype.lower():
+            return "FLOAT"
+        elif 'int' in dtype.lower():
+            return "INTEGER"
+        elif 'bool' in dtype.lower():
+            return "BOOLEAN"
+        elif 'date' in dtype.lower():
+            return "DATE"
+        elif 'datetime' in dtype.lower() or 'timestamp' in dtype.lower():
+            return "TIMESTAMP"
+        
+        # ถ้าเป็น String ให้ตรวจสอบเพิ่มเติม
+        if 'str' in dtype.lower() or 'object' in dtype.lower():
+            # สุ่มตัวอย่างข้อมูล (ไม่เกิน 100 แถว)
+            sample = series.drop_nulls().sample(n=min(100, series.len() - series.null_count()))
+            if len(sample) == 0:
+                return "STRING"
+            
+            # ตรวจสอบว่าอาจเป็น Boolean หรือไม่
+            bool_values = {'true', 'false', 'yes', 'no', 'y', 'n', '1', '0', 't', 'f'}
+            if all(str(v).lower() in bool_values for v in sample if v is not None and str(v).strip()):
+                return "BOOLEAN"
+            
+            # ตรวจสอบว่าอาจเป็นตัวเลขหรือไม่
+            try:
+                # ทดลองแปลงเป็น float ทุกค่าในตัวอย่าง
+                all_numeric = all(
+                    (isinstance(v, (int, float)) or (isinstance(v, str) and v.strip() and float(v.strip())))
+                    for v in sample if v is not None and str(v).strip()
+                )
+                if all_numeric:
+                    # ตรวจสอบว่าเป็น integer ทั้งหมดหรือไม่
+                    all_integer = all(
+                        (isinstance(v, int) or (isinstance(v, str) and v.strip() and float(v.strip()).is_integer()))
+                        for v in sample if v is not None and str(v).strip()
+                    )
+                    return "INTEGER" if all_integer else "FLOAT"
+            except:
+                pass
+            
+            # ตรวจสอบว่าอาจเป็นวันที่หรือไม่
+            date_patterns = [
+                r'^\d{4}-\d{2}-\d{2}$',  # YYYY-MM-DD
+                r'^\d{2}/\d{2}/\d{4}$',  # DD/MM/YYYY or MM/DD/YYYY
+                r'^\d{2}-\d{2}-\d{4}$',  # DD-MM-YYYY or MM-DD-YYYY
+                r'^\d{1,2}\s+[a-zA-Z]{3,9}\s+\d{4}$',  # DD Month YYYY
+            ]
+            
+            # ตรวจสอบว่ามีรูปแบบวันที่หรือไม่
+            has_date_pattern = False
+            for pattern in date_patterns:
+                if any(re.match(pattern, str(v).strip()) for v in sample if v is not None and str(v).strip()):
+                    has_date_pattern = True
+                    break
+            
+            if has_date_pattern:
+                # ตรวจสอบว่ามีเวลาหรือไม่
+                time_pattern = r'\d{1,2}:\d{2}(:\d{2})?(\s*[ap]m)?'
+                has_time = any(
+                    re.search(time_pattern, str(v).strip(), re.IGNORECASE)
+                    for v in sample if v is not None and str(v).strip()
+                )
+                
+                return "TIMESTAMP" if has_time else "DATE"
+        
+        # ค่าเริ่มต้นเป็น STRING
+        return "STRING"
+    
+    def _compute_type_specific_stats(self, series: pl.Series, inferred_type: str) -> Dict[str, Any]:
+        """คำนวณสถิติตามชนิดข้อมูล"""
+        stats = {}
+        
+        try:
+            # สถิติสำหรับตัวเลข
+            if inferred_type in ["INTEGER", "FLOAT"]:
+                numeric_series = series.drop_nulls()
+                if len(numeric_series) > 0:
+                    try:
+                        # ใช้ cast เพื่อแปลงเป็น float
+                        if series.dtype == pl.String:
+                            numeric_series = numeric_series.cast(pl.Float64, strict=False)
+                        
+                        stats["min"] = float(numeric_series.min())
+                        stats["max"] = float(numeric_series.max())
+                        stats["mean"] = float(numeric_series.mean())
+                        stats["median"] = float(numeric_series.median())
+                        stats["std_dev"] = float(numeric_series.std())
+                    except:
+                        # ถ้าไม่สามารถคำนวณได้ ให้เว้นว่างไว้
+                        pass
+            
+            # สถิติสำหรับวันที่
+            elif inferred_type in ["DATE", "TIMESTAMP"]:
+                if series.dtype in [pl.Date, pl.Datetime]:
+                    date_series = series.drop_nulls()
+                    if len(date_series) > 0:
+                        stats["min"] = date_series.min().strftime('%Y-%m-%d')
+                        stats["max"] = date_series.max().strftime('%Y-%m-%d')
+            
+            # สถิติสำหรับข้อความ
+            elif inferred_type == "STRING":
+                text_series = series.drop_nulls()
+                if len(text_series) > 0:
+                    # คำนวณความยาวเฉลี่ย
+                    try:
+                        lengths = text_series.map_elements(lambda x: len(str(x)) if x is not None else 0)
+                        stats["avg_length"] = float(lengths.mean())
+                        stats["max_length"] = int(lengths.max())
+                    except:
+                        # ถ้าไม่สามารถคำนวณได้ ให้เว้นว่างไว้
+                        pass
+        except Exception as e:
+            print(f"Error computing type-specific stats: {e}")
+        
+        return stats
+    
+    def _get_sample_values(self, series: pl.Series, max_samples: int = 5) -> List[Any]:
+        """ดึงตัวอย่างข้อมูลจากคอลัมน์"""
+        try:
+            # ดึงค่าที่ไม่ซ้ำกันไม่เกิน max_samples ค่า
+            unique_values = series.drop_nulls().unique()
+            
+            if len(unique_values) > max_samples:
+                # สุ่มตัวอย่างถ้ามีค่ามากเกินไป
+                samples = unique_values.sample(n=max_samples)
+            else:
+                samples = unique_values
+            
+            # แปลงเป็น Python list
+            result = samples.to_list()
+            
+            # แปลงวัตถุที่ซับซ้อนให้เป็น string
+            for i, val in enumerate(result):
+                if isinstance(val, (datetime, pd.Timestamp)):
+                    result[i] = val.strftime('%Y-%m-%d %H:%M:%S')
+                elif not isinstance(val, (str, int, float, bool, type(None))):
+                    result[i] = str(val)
+            
+            return result
+        except Exception as e:
+            print(f"Error getting sample values: {e}")
+            return []
+    
+    def _check_column_issues(self, series: pl.Series, inferred_type: str, null_pct: float, distinct_pct: float) -> List[str]:
+        """ตรวจสอบปัญหาที่อาจมีในคอลัมน์"""
+        issues = []
+        
+        # ตรวจสอบค่า null สูง
+        if null_pct > 20:
+            issues.append("high_null_percentage")
+        
+        # ตรวจสอบค่าที่ไม่ซ้ำกันสูง (อาจเป็น primary key หรือ unique identifier)
+        if distinct_pct > 95 and series.len() > 10:
+            issues.append("high_cardinality")
+        
+        # ตรวจสอบค่าที่ไม่ซ้ำกันต่ำ (อาจเป็น categorical หรือ enum)
+        if distinct_pct < 1 and series.len() > 100:
+            issues.append("low_cardinality")
+        
+        # ตรวจสอบปัญหาตามประเภทข้อมูล
+        if inferred_type in ["INTEGER", "FLOAT"]:
+            try:
+                numeric_series = series.drop_nulls()
+                if numeric_series.dtype == pl.String:
+                    numeric_series = numeric_series.cast(pl.Float64, strict=False)
+                
+                # ตรวจสอบการกระจายตัวที่ผิดปกติ
+                std = numeric_series.std()
+                mean = numeric_series.mean()
+                
+                if std > mean * 10:
+                    issues.append("high_variance")
+                
+                # ตรวจสอบ outliers
+                q1 = numeric_series.quantile(0.25)
+                q3 = numeric_series.quantile(0.75)
+                iqr = q3 - q1
+                
+                lower_bound = q1 - 1.5 * iqr
+                upper_bound = q3 + 1.5 * iqr
+                
+                outliers = numeric_series.filter((numeric_series < lower_bound) | (numeric_series > upper_bound))
+                
+                if len(outliers) > len(numeric_series) * 0.05:
+                    issues.append("possible_outliers")
+            except:
+                # ถ้าไม่สามารถแปลงเป็น numeric ได้ ให้เพิ่มปัญหา
+                if inferred_type in ["INTEGER", "FLOAT"]:
+                    issues.append("mixed_numeric_formats")
+        
+        # ตรวจสอบรูปแบบ timestamp ที่หลากหลาย
+        if inferred_type in ["DATE", "TIMESTAMP"] and series.dtype == pl.String:
+            issues.append("mixed_date_formats")
+        
+        return issues

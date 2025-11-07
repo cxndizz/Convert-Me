@@ -1,0 +1,13 @@
+fastapi>=0.104.0
+uvicorn>=0.23.2
+python-multipart>=0.0.6
+duckdb>=0.9.1
+polars>=0.19.12
+pyarrow>=14.0.1
+pydantic>=2.4.2
+sqlglot>=22.0.0
+chardet>=5.0.0
+pandas>=2.0.0
+openpyxl>=3.0.0  # สำหรับไฟล์ .xlsx
+xlrd>=2.0.0  # สำหรับไฟล์ .xls
+numpy>=1.20.0
