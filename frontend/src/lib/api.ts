@@ -1,153 +1,122 @@
-// API client สำหรับติดต่อกับ backend
+// Path: /frontend/src/lib/api.ts
 
-// Base URL สำหรับเรียก API
-const API_BASE_URL = '/api/v1';
+import axios from 'axios';
 
-// ข้อมูลตอบกลับจากการสร้าง session
-export interface SessionResponse {
-  session_id: string;
-  ttl_s: number;
-}
+import { 
+  Session, 
+  FileInfo, 
+  DataProfile, 
+  DataConfig, 
+  ValidationResult,
+  SqlOptions,
+  ExportFormat
+} from '../types';
 
-// ข้อมูลตอบกลับจากการอัปโหลดไฟล์
-export interface FileUploadResponse {
-  session_id: string;
-  file_id: string;
-  original_filename: string;
-  size_bytes: number;
-  detected_delimiter?: string;
-  encoding?: string;
-  header_detected?: boolean;
-}
+// Base API URL จาก env variable หรือค่าเริ่มต้น
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:7002';
 
-// ข้อมูล session
-export interface SessionInfo {
-  session_id: string;
-  created_at: string;
-  last_access: string;
-  files: Array<{
-    file_id: string;
-    original_filename: string;
-    size_bytes: number;
-    uploaded_at: string;
-    encoding?: string;
-    detected_delimiter?: string;
-    header_detected?: boolean;
-  }>;
-  ttl_s: number;
-}
+const api = axios.create({
+  baseURL: `${API_BASE_URL}/api/v1`,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
 
-// Function สร้าง session ใหม่
-export async function createSession(): Promise<SessionResponse> {
-  const response = await fetch(`${API_BASE_URL}/sessions`, {
-    method: 'POST',
-  });
-  
-  if (!response.ok) {
-    throw new Error(`Failed to create session: ${response.statusText}`);
+// Session API functions
+export const createSession = async (): Promise<Session> => {
+  const response = await api.post('/sessions');
+  return response.data;
+};
+
+export const deleteSession = async (sessionId: string): Promise<void> => {
+  await api.delete(`/sessions/${sessionId}`);
+};
+
+// File API functions
+export const uploadFile = async (
+  sessionId: string, 
+  file: File, 
+  options?: { 
+    delimiter?: string; 
+    encoding?: string; 
+    hasHeader?: boolean 
   }
-  
-  return await response.json();
-}
-
-// Function อัปโหลดไฟล์
-export async function uploadFile(sessionId: string, file: File): Promise<FileUploadResponse> {
+): Promise<FileInfo> => {
   const formData = new FormData();
   formData.append('file', file);
   
-  const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}/files`, {
-    method: 'POST',
-    body: formData,
+  if (options) {
+    if (options.delimiter) formData.append('delimiter', options.delimiter);
+    if (options.encoding) formData.append('encoding', options.encoding);
+    if (options.hasHeader !== undefined) formData.append('has_header', String(options.hasHeader));
+  }
+  
+  const response = await api.post(`/sessions/${sessionId}/files`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
   });
   
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(`Failed to upload file: ${errorData.detail || response.statusText}`);
-  }
-  
-  return await response.json();
-}
+  return response.data;
+};
 
-// Function ดูข้อมูล session
-export async function getSessionInfo(sessionId: string): Promise<SessionInfo> {
-  const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}`);
-  
-  if (!response.ok) {
-    throw new Error(`Failed to get session info: ${response.statusText}`);
-  }
-  
-  return await response.json();
-}
+export const generateProfile = async (sessionId: string): Promise<DataProfile> => {
+  const response = await api.post(`/sessions/${sessionId}/profile`);
+  return response.data;
+};
 
-// Function ลบ session
-export async function deleteSession(sessionId: string): Promise<{ status: string; message: string }> {
-  const response = await fetch(`${API_BASE_URL}/sessions/${sessionId}`, {
-    method: 'DELETE',
+export const getDataPreview = async (
+  sessionId: string, 
+  offset: number = 0, 
+  limit: number = 100,
+  configId?: string
+): Promise<{data: any[], total: number, offset: number, limit: number}> => {
+  const params: any = { offset, limit };
+  if (configId) params.apply_config_id = configId;
+  
+  const response = await api.get(`/sessions/${sessionId}/preview`, { params });
+  return response.data;
+};
+
+// Configuration API functions
+export const saveConfig = async (sessionId: string, config: DataConfig): Promise<{ config_id: string }> => {
+  const response = await api.post(`/sessions/${sessionId}/configs`, config);
+  return response.data;
+};
+
+export const validateConfig = async (sessionId: string, configId: string): Promise<ValidationResult> => {
+  const response = await api.post(`/sessions/${sessionId}/validate`, { config_id: configId });
+  return response.data;
+};
+
+// Export API functions
+export const exportData = async (
+  sessionId: string, 
+  configId: string, 
+  format: ExportFormat
+): Promise<void> => {
+  // Create a blob URL and trigger download
+  window.location.href = `${API_BASE_URL}/api/v1/sessions/${sessionId}/export?config_id=${configId}&format=${format}`;
+};
+
+export const generateSql = async (
+  sessionId: string, 
+  configId: string, 
+  options: SqlOptions
+): Promise<string> => {
+  const response = await api.post(`/sessions/${sessionId}/sql`, {
+    config_id: configId,
+    ...options,
   });
-  
-  if (!response.ok) {
-    throw new Error(`Failed to delete session: ${response.statusText}`);
-  }
-  
-  return await response.json();
-}
+  return response.data.sql;
+};
 
-
-// เพิ่ม interface สำหรับ profile response
-export interface ColumnProfile {
-  name: string;
-  inferred_type: string;
-  null_count: number;
-  null_pct: number;
-  distinct_count: number;
-  distinct_pct: number;
-  sample_values: any[];
-  issues: string[];
-  min?: number | string;
-  max?: number | string;
-  mean?: number;
-  median?: number;
-  std_dev?: number;
-  avg_length?: number;
-  max_length?: number;
-}
-
-export interface ProfileResponse {
-  row_count: number;
-  column_count: number;
-  file_name: string;
-  file_extension: string;
-  encoding: string;
-  delimiter?: string;
-  header_detected?: boolean;
-  columns_profile: ColumnProfile[];
-}
-
-// เพิ่มฟังก์ชันนี้ต่อจากฟังก์ชันอื่น ๆ ใน api.ts
-export async function generateProfile(
-  sessionId: string,
-  fileId?: string,
-  maxSampleRows: number = 10000
-): Promise<ProfileResponse> {
-  let url = `${API_BASE_URL}/sessions/${sessionId}/profile`;
-  
-  // ถ้ามี fileId ให้เพิ่มเป็น query parameter
-  if (fileId) {
-    url += `?file_id=${fileId}`;
+// Health check
+export const checkHealth = async (): Promise<boolean> => {
+  try {
+    const response = await api.get('/health');
+    return response.status === 200;
+  } catch (error) {
+    return false;
   }
-  
-  if (maxSampleRows !== 10000) {
-    url += `${fileId ? '&' : '?'}max_sample_rows=${maxSampleRows}`;
-  }
-  
-  const response = await fetch(url, {
-    method: 'POST',
-  });
-  
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(`Failed to generate profile: ${errorData.detail || response.statusText}`);
-  }
-  
-  return await response.json();
-}
+};
