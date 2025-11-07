@@ -36,11 +36,20 @@ class DataProfiler:
         max_sample_rows: จำนวนแถวสูงสุดที่จะใช้เป็นตัวอย่าง
         """
         try:
+            print(f"Processing file: {self.file_path} with extension: {self.file_extension}")
+            
             # ตรวจสอบประเภทไฟล์และเลือกวิธีการโหลดข้อมูลที่เหมาะสม
             if self.file_extension in ['.csv', '.txt']:
                 df = self._load_csv_data(max_sample_rows)
             elif self.file_extension in ['.xls', '.xlsx']:
-                df = self._load_excel_data(max_sample_rows)
+                try:
+                    df = self._load_excel_data(max_sample_rows)
+                    # ตรวจสอบว่าได้ข้อมูลมาหรือไม่
+                    if df is None or df.shape[0] == 0:
+                        return {"error": "Excel file contains no data or could not be parsed properly"}
+                except Exception as e:
+                    print(f"Excel loading failed: {str(e)}")
+                    return {"error": f"Failed to load Excel file: {str(e)}"}
             elif self.file_extension == '.sql':
                 df = self._load_sql_data(max_sample_rows)
             else:
@@ -57,6 +66,7 @@ class DataProfiler:
             
         except Exception as e:
             # ถ้ามีข้อผิดพลาด คืนข้อความข้อผิดพลาด
+            print(f"Error in profile method: {str(e)}")
             return {"error": str(e)}
     
     def _load_csv_data(self, max_rows: int) -> pl.DataFrame:
@@ -135,59 +145,107 @@ class DataProfiler:
     
     def _load_excel_data(self, max_rows: int) -> pl.DataFrame:
         """โหลดข้อมูล Excel โดยใช้ pandas แล้วแปลงเป็น Polars"""
+        print(f"Attempting to load Excel file: {self.file_path}")
+        
+        # ลองหลายวิธีสำหรับการอ่านไฟล์ Excel
         try:
-            # ตรวจสอบนามสกุลไฟล์เพื่อเลือก engine ที่เหมาะสม
-            file_ext = os.path.splitext(self.file_path)[1].lower()
-            
-            if file_ext == '.xlsx':
-                # สำหรับไฟล์ .xlsx ใช้ openpyxl
-                engine = 'openpyxl'
-            elif file_ext == '.xls':
-                # สำหรับไฟล์ .xls ใช้ xlrd
-                engine = 'xlrd'
-            else:
-                # กรณีไม่สามารถระบุได้ชัดเจน ลองใช้ openpyxl ก่อน
-                engine = 'openpyxl'
-            
-            # อ่านเฉพาะ n แถวแรกเพื่อประหยัดหน่วยความจำ
+            # วิธีที่ 1: ใช้ pandas อย่างเดียวโดยไม่ระบุ engine
+            print("Trying to load Excel without specifying engine")
             df_pd = pd.read_excel(
                 self.file_path,
                 nrows=max_rows,
-                header=0 if self.header else None,
-                engine=engine  # ระบุ engine ที่จะใช้
+                header=0 if self.header else None
             )
+            print(f"Successfully loaded Excel file with default engine, shape: {df_pd.shape}")
             
-            # แปลงเป็น Polars DataFrame
-            df = pl.from_pandas(df_pd)
-            return df
-        except Exception as e:
-            print(f"Error loading Excel: {e}")
+        except Exception as e1:
+            print(f"Default Excel loading method failed: {e1}")
             
-            # ลองใช้ engine ตัวอื่นหากวิธีแรกไม่สำเร็จ
             try:
-                if engine == 'openpyxl':
-                    print("Trying with xlrd engine instead...")
+                # วิธีที่ 2: ลองใช้ engine='openpyxl' สำหรับ .xlsx
+                print("Trying openpyxl engine")
+                df_pd = pd.read_excel(
+                    self.file_path,
+                    nrows=max_rows,
+                    header=0 if self.header else None,
+                    engine='openpyxl'
+                )
+                print(f"Successfully loaded Excel with openpyxl, shape: {df_pd.shape}")
+                
+            except Exception as e2:
+                print(f"Excel loading with openpyxl failed: {e2}")
+                
+                try:
+                    # วิธีที่ 3: ลองใช้ engine='xlrd' สำหรับ .xls
+                    print("Trying xlrd engine")
                     df_pd = pd.read_excel(
                         self.file_path,
                         nrows=max_rows,
                         header=0 if self.header else None,
                         engine='xlrd'
                     )
-                else:
-                    print("Trying with openpyxl engine instead...")
-                    df_pd = pd.read_excel(
-                        self.file_path,
-                        nrows=max_rows,
-                        header=0 if self.header else None,
-                        engine='openpyxl'
-                    )
+                    print(f"Successfully loaded Excel with xlrd, shape: {df_pd.shape}")
+                    
+                except Exception as e3:
+                    print(f"Excel loading with xlrd failed: {e3}")
+                    
+                    # วิธีที่ 4: สำหรับ .xlsx ใช้ engine='odf' (สำหรับบางไฟล์ที่เป็น corrupted xlsx)
+                    if self.file_extension == '.xlsx':
+                        try:
+                            print("Trying odf engine")
+                            df_pd = pd.read_excel(
+                                self.file_path,
+                                nrows=max_rows,
+                                header=0 if self.header else None,
+                                engine='odf'
+                            )
+                            print(f"Successfully loaded Excel with odf, shape: {df_pd.shape}")
+                        except Exception as e4:
+                            print(f"All Excel loading methods failed: {e1}, {e2}, {e3}, {e4}")
+                            raise ValueError(f"Failed to load Excel file after trying multiple engines: {e4}")
+                    else:
+                        print(f"All Excel loading methods failed: {e1}, {e2}, {e3}")
+                        raise ValueError(f"Failed to load Excel file after trying multiple engines: {e3}")
+        
+        try:
+            # แปลงเป็น Polars DataFrame
+            print("Converting pandas DataFrame to Polars")
+            df = pl.from_pandas(df_pd)
+            print(f"Successfully converted to Polars, shape: {df.shape}")
+            return df
+        except Exception as e:
+            print(f"Error converting pandas DataFrame to Polars: {e}")
+            # ถ้าไม่สามารถแปลงเป็น Polars ได้ ให้สร้าง DataFrame ขึ้นมาใหม่
+            print("Creating basic Polars DataFrame from pandas")
+            try:
+                # สร้างคอลัมน์และข้อมูลใหม่
+                columns = df_pd.columns.tolist()
+                data = {}
                 
-                # แปลงเป็น Polars DataFrame
-                df = pl.from_pandas(df_pd)
+                for col in columns:
+                    # แปลง Series เป็น list โดยจัดการ NaN และ complex objects
+                    values = []
+                    for val in df_pd[col]:
+                        if pd.isna(val):
+                            values.append(None)
+                        elif isinstance(val, (int, float, str, bool)):
+                            values.append(val)
+                        else:
+                            values.append(str(val))
+                    data[col] = values
+                
+                # สร้าง Polars DataFrame
+                df = pl.DataFrame(data)
+                print(f"Created Polars DataFrame manually, shape: {df.shape}")
                 return df
             except Exception as e2:
-                print(f"All Excel loading methods failed: {e2}")
-                raise ValueError(f"Failed to load Excel file: {e2}")
+                print(f"Failed to create Polars DataFrame manually: {e2}")
+                # สร้าง DataFrame ว่างๆ พร้อมข้อความข้อผิดพลาด
+                df = pl.DataFrame({
+                    "Column1": ["Excel file could not be processed"],
+                    "Status": ["Error: Please check file format"]
+                })
+                return df
     
     def _load_sql_data(self, max_rows: int) -> pl.DataFrame:
         """
@@ -289,28 +347,46 @@ class DataProfiler:
         """คำนวณสถิติต่อคอลัมน์"""
         columns_profile = []
         
+        # ตรวจสอบว่า DataFrame ไม่ว่างเปล่า
+        if df.shape[0] == 0:
+            self.profile_results["columns_profile"] = []
+            return
+        
         for col_name in df.columns:
             col_series = df[col_name]
             
             # นับค่า null
-            null_count = col_series.null_count()
-            null_pct = (null_count / len(df)) * 100 if len(df) > 0 else 0
+            try:
+                null_count = col_series.null_count()
+                null_pct = (null_count / len(df)) * 100 if len(df) > 0 else 0
+            except Exception as e:
+                print(f"Error calculating null stats for column {col_name}: {e}")
+                null_count = 0
+                null_pct = 0
             
             # นับค่าที่ไม่ซ้ำกัน
             try:
                 unique_values = col_series.drop_nulls().unique()
                 distinct_count = len(unique_values)
                 distinct_pct = (distinct_count / (len(df) - null_count)) * 100 if (len(df) - null_count) > 0 else 0
-            except:
-                # ในกรณีที่มีปัญหากับการนับค่าที่ไม่ซ้ำ
+            except Exception as e:
+                print(f"Error calculating distinct stats for column {col_name}: {e}")
                 distinct_count = 0
                 distinct_pct = 0
             
             # เดาชนิดข้อมูล
-            inferred_type = self._infer_column_type(col_series)
+            try:
+                inferred_type = self._infer_column_type(col_series)
+            except Exception as e:
+                print(f"Error inferring type for column {col_name}: {e}")
+                inferred_type = "STRING"
             
             # คำนวณค่าสถิติตามชนิดข้อมูล
-            stats = self._compute_type_specific_stats(col_series, inferred_type)
+            try:
+                stats = self._compute_type_specific_stats(col_series, inferred_type)
+            except Exception as e:
+                print(f"Error computing type-specific stats for column {col_name}: {e}")
+                stats = {}
             
             # รวมข้อมูลโปรไฟล์คอลัมน์
             col_profile = {
@@ -324,10 +400,18 @@ class DataProfiler:
             }
             
             # เพิ่มตัวอย่างข้อมูล
-            col_profile["sample_values"] = self._get_sample_values(col_series)
+            try:
+                col_profile["sample_values"] = self._get_sample_values(col_series)
+            except Exception as e:
+                print(f"Error getting sample values for column {col_name}: {e}")
+                col_profile["sample_values"] = []
             
             # ตรวจสอบปัญหา
-            col_profile["issues"] = self._check_column_issues(col_series, inferred_type, null_pct, distinct_pct)
+            try:
+                col_profile["issues"] = self._check_column_issues(col_series, inferred_type, null_pct, distinct_pct)
+            except Exception as e:
+                print(f"Error checking column issues for {col_name}: {e}")
+                col_profile["issues"] = []
             
             columns_profile.append(col_profile)
         
@@ -357,14 +441,21 @@ class DataProfiler:
         # ถ้าเป็น String ให้ตรวจสอบเพิ่มเติม
         if 'str' in dtype.lower() or 'object' in dtype.lower():
             # สุ่มตัวอย่างข้อมูล (ไม่เกิน 100 แถว)
-            sample = series.drop_nulls().sample(n=min(100, series.len() - series.null_count()))
-            if len(sample) == 0:
+            try:
+                sample = series.drop_nulls().sample(n=min(100, series.len() - series.null_count()))
+                if len(sample) == 0:
+                    return "STRING"
+            except Exception as e:
+                print(f"Error sampling column data: {e}")
                 return "STRING"
             
             # ตรวจสอบว่าอาจเป็น Boolean หรือไม่
             bool_values = {'true', 'false', 'yes', 'no', 'y', 'n', '1', '0', 't', 'f'}
-            if all(str(v).lower() in bool_values for v in sample if v is not None and str(v).strip()):
-                return "BOOLEAN"
+            try:
+                if all(str(v).lower() in bool_values for v in sample if v is not None and str(v).strip()):
+                    return "BOOLEAN"
+            except Exception as e:
+                print(f"Error checking boolean values: {e}")
             
             # ตรวจสอบว่าอาจเป็นตัวเลขหรือไม่
             try:
@@ -401,12 +492,15 @@ class DataProfiler:
             if has_date_pattern:
                 # ตรวจสอบว่ามีเวลาหรือไม่
                 time_pattern = r'\d{1,2}:\d{2}(:\d{2})?(\s*[ap]m)?'
-                has_time = any(
-                    re.search(time_pattern, str(v).strip(), re.IGNORECASE)
-                    for v in sample if v is not None and str(v).strip()
-                )
-                
-                return "TIMESTAMP" if has_time else "DATE"
+                try:
+                    has_time = any(
+                        re.search(time_pattern, str(v).strip(), re.IGNORECASE)
+                        for v in sample if v is not None and str(v).strip()
+                    )
+                    
+                    return "TIMESTAMP" if has_time else "DATE"
+                except Exception as e:
+                    print(f"Error checking time pattern: {e}")
         
         # ค่าเริ่มต้นเป็น STRING
         return "STRING"
@@ -430,17 +524,19 @@ class DataProfiler:
                         stats["mean"] = float(numeric_series.mean())
                         stats["median"] = float(numeric_series.median())
                         stats["std_dev"] = float(numeric_series.std())
-                    except:
-                        # ถ้าไม่สามารถคำนวณได้ ให้เว้นว่างไว้
-                        pass
+                    except Exception as e:
+                        print(f"Error computing numeric stats: {e}")
             
             # สถิติสำหรับวันที่
             elif inferred_type in ["DATE", "TIMESTAMP"]:
                 if series.dtype in [pl.Date, pl.Datetime]:
                     date_series = series.drop_nulls()
                     if len(date_series) > 0:
-                        stats["min"] = date_series.min().strftime('%Y-%m-%d')
-                        stats["max"] = date_series.max().strftime('%Y-%m-%d')
+                        try:
+                            stats["min"] = date_series.min().strftime('%Y-%m-%d')
+                            stats["max"] = date_series.max().strftime('%Y-%m-%d')
+                        except Exception as e:
+                            print(f"Error computing date stats: {e}")
             
             # สถิติสำหรับข้อความ
             elif inferred_type == "STRING":
@@ -451,11 +547,10 @@ class DataProfiler:
                         lengths = text_series.map_elements(lambda x: len(str(x)) if x is not None else 0)
                         stats["avg_length"] = float(lengths.mean())
                         stats["max_length"] = int(lengths.max())
-                    except:
-                        # ถ้าไม่สามารถคำนวณได้ ให้เว้นว่างไว้
-                        pass
+                    except Exception as e:
+                        print(f"Error computing string stats: {e}")
         except Exception as e:
-            print(f"Error computing type-specific stats: {e}")
+            print(f"Error in _compute_type_specific_stats: {e}")
         
         return stats
     
@@ -483,7 +578,7 @@ class DataProfiler:
             
             return result
         except Exception as e:
-            print(f"Error getting sample values: {e}")
+            print(f"Error in _get_sample_values: {e}")
             return []
     
     def _check_column_issues(self, series: pl.Series, inferred_type: str, null_pct: float, distinct_pct: float) -> List[str]:
@@ -506,29 +601,32 @@ class DataProfiler:
         if inferred_type in ["INTEGER", "FLOAT"]:
             try:
                 numeric_series = series.drop_nulls()
-                if numeric_series.dtype == pl.String:
-                    numeric_series = numeric_series.cast(pl.Float64, strict=False)
-                
-                # ตรวจสอบการกระจายตัวที่ผิดปกติ
-                std = numeric_series.std()
-                mean = numeric_series.mean()
-                
-                if std > mean * 10:
-                    issues.append("high_variance")
-                
-                # ตรวจสอบ outliers
-                q1 = numeric_series.quantile(0.25)
-                q3 = numeric_series.quantile(0.75)
-                iqr = q3 - q1
-                
-                lower_bound = q1 - 1.5 * iqr
-                upper_bound = q3 + 1.5 * iqr
-                
-                outliers = numeric_series.filter((numeric_series < lower_bound) | (numeric_series > upper_bound))
-                
-                if len(outliers) > len(numeric_series) * 0.05:
-                    issues.append("possible_outliers")
-            except:
+                if len(numeric_series) > 0:
+                    if series.dtype == pl.String:
+                        numeric_series = numeric_series.cast(pl.Float64, strict=False)
+                    
+                    # ตรวจสอบการกระจายตัวที่ผิดปกติ
+                    std = numeric_series.std()
+                    mean = numeric_series.mean()
+                    
+                    if not pd.isna(std) and not pd.isna(mean) and mean != 0 and std > mean * 10:
+                        issues.append("high_variance")
+                    
+                    # ตรวจสอบ outliers
+                    q1 = numeric_series.quantile(0.25)
+                    q3 = numeric_series.quantile(0.75)
+                    iqr = q3 - q1
+                    
+                    if iqr > 0:  # ป้องกัน division by zero
+                        lower_bound = q1 - 1.5 * iqr
+                        upper_bound = q3 + 1.5 * iqr
+                        
+                        outliers = numeric_series.filter((numeric_series < lower_bound) | (numeric_series > upper_bound))
+                        
+                        if len(outliers) > len(numeric_series) * 0.05:
+                            issues.append("possible_outliers")
+            except Exception as e:
+                print(f"Error checking numeric column issues: {e}")
                 # ถ้าไม่สามารถแปลงเป็น numeric ได้ ให้เพิ่มปัญหา
                 if inferred_type in ["INTEGER", "FLOAT"]:
                     issues.append("mixed_numeric_formats")
