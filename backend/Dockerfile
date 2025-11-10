@@ -2,18 +2,18 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# คัดลอกเฉพาะ requirements.txt ก่อนเพื่อใช้ Docker cache
+# Copy requirements.txt first for caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# คัดลอกไฟล์โปรเจคที่เหลือ
+# Copy project files
 COPY . .
 
-# สร้างโฟลเดอร์ temp ถ้ายังไม่มี
+# Create temp directory
 RUN mkdir -p /data/tmp
 
-# เปิดพอร์ต 7002
+# Expose port 7002
 EXPOSE 7002
 
-# รัน uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7002", "--reload"]
+# Run uvicorn with the correct path to main.py
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7002"]

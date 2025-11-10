@@ -1,31 +1,17 @@
-# FROM node:20-alpine
-
-# WORKDIR /app
-
-# # ติดตั้ง dependencies
-# COPY package*.json ./
-# RUN npm ci
-
-# # คัดลอกไฟล์โปรเจคทั้งหมด
-# COPY . .
-
-# # สร้าง production build
-# RUN npm run build
-
-# EXPOSE 3000
-
-# # รัน Next.js ในโหมด production
-# CMD ["npm", "start"]
-
 FROM node:18-alpine
 
 WORKDIR /app
 
+# Copy package files
 COPY package*.json ./
+
+# Use npm install instead of npm ci
 RUN npm install
 
+# Copy project files
 COPY . .
 
 EXPOSE 3000
 
+# Use dev server for now since we haven't built the production version yet
 CMD ["npm", "run", "dev"]

@@ -13,7 +13,7 @@ import {
 } from '../types';
 
 // Base API URL จาก env variable หรือค่าเริ่มต้น
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:7002';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
 const api = axios.create({
   baseURL: `${API_BASE_URL}/api/v1`,

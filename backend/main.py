@@ -6,6 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 from data_profiler import DataProfiler
+try:
+    from improved_data_profiler import DataProfiler
+except ImportError:
+    from data_profiler import DataProfiler
 import csv
 
 from models import SessionManager, SessionResponse, FileUploadResponse
@@ -237,3 +241,7 @@ async def generate_profile(
                 break
     
     return profile_results
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=7002)
